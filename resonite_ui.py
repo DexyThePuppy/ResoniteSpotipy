@@ -819,6 +819,9 @@ class SpotipyUI:
         self.lock = threading.Lock()
         self.resize_event = threading.Event()
         
+        # Store initial terminal size
+        self.term_height, self.term_width = stdscr.getmaxyx()
+        
         # Initialize curses
         curses.start_color()
         curses.use_default_colors()
@@ -841,6 +844,12 @@ class SpotipyUI:
         curses.init_pair(COLOR_PAUSED, curses.COLOR_YELLOW, -1)  # Paused text
         curses.init_pair(COLOR_TIMESTAMP, curses.COLOR_MAGENTA, -1)  # Timestamp text
         
+        # Try to enable special key handling
+        try:
+            stdscr.keypad(True)
+        except:
+            pass
+            
         # Initialize UI components
         self.status_bar = StatusBar(stdscr)
         self.log_window = LogWindow(stdscr)
@@ -857,35 +866,70 @@ class SpotipyUI:
         self.update_thread.daemon = True
         self.update_thread.start()
     
+    def add_log(self, message):
+        """Add a log message to the log window"""
+        self.log_window.add_log(message)
+        self.log_window.render(None)
+        self.stdscr.refresh()
+    
+    def set_client_status(self, connected, client_id=""):
+        """Set the client connection status"""
+        self.status_bar.set_client_status(connected, client_id)
+        self.status_bar.render(None)
+        self.stdscr.refresh()
+    
+    def shutdown(self):
+        """Shutdown the UI"""
+        self.running = False
+        self.shutdown_flag.set()
+        time.sleep(0.2)  # Give update thread time to exit
+    
     def setup_resize_handler(self):
         """Set up a signal handler for terminal resize events"""
         try:
+            # Only try to use SIGWINCH on Unix-like systems
             import signal
-            signal.signal(signal.SIGWINCH, self.handle_resize)
-        except:
-            self.add_log("Warning: Terminal resize handling not fully supported on this platform")
+            if hasattr(signal, 'SIGWINCH'):
+                signal.signal(signal.SIGWINCH, self.handle_resize)
+            else:
+                # Windows doesn't have SIGWINCH
+                self.add_log("Using polling for resize detection")
+        except Exception:
+            # Any error means we fall back to polling
+            self.add_log("Using polling for resize detection")
     
-    def handle_resize(self, signum, frame):
+    def handle_resize(self, signum=None, frame=None):
         """Handle terminal resize event"""
         # Set the resize event flag
         self.resize_event.set()
+    
+    def check_resize(self):
+        """Check if terminal dimensions have changed"""
+        try:
+            new_height, new_width = self.stdscr.getmaxyx()
+            if new_height != self.term_height or new_width != self.term_width:
+                self.term_height, self.term_width = new_height, new_width
+                return True
+        except:
+            pass
+        return False
     
     def resize_ui(self):
         """Resize and redraw all UI components"""
         with self.lock:
             try:
-                # Update terminal size
-                curses.update_lines_cols()
-                
-                # Clear entire screen
+                # Clear the terminal and reset cursor position
                 self.stdscr.clear()
+                
+                # Store new terminal dimensions
+                self.term_height, self.term_width = self.stdscr.getmaxyx()
                 
                 # Recalculate component dimensions
                 self.status_bar.restart()
                 self.log_window.restart()
                 self.now_playing.restart()
                 
-                # Redraw all components
+                # Redraw all components in proper order
                 self.status_bar.render(None)
                 self.log_window.render(None)
                 self.now_playing.render(None)
@@ -893,8 +937,9 @@ class SpotipyUI:
                 # Refresh the screen
                 self.stdscr.refresh()
                 
-                # Log the resize event
-                self.add_log("Terminal resized, UI adjusted")
+                # Log the resize event (but only if it wasn't the initial setup)
+                if self.running:
+                    self.add_log(f"Terminal resized to {self.term_width}x{self.term_height}")
             except Exception as e:
                 # Try to log the error, but don't cause additional issues
                 try:
@@ -905,17 +950,57 @@ class SpotipyUI:
             # Clear the resize event flag
             self.resize_event.clear()
     
+    def test_border_colors(self):
+        """Test cycling through border colors"""
+        self.add_log("Testing border colors...")
+        colors = [
+            ("Red", curses.COLOR_RED),
+            ("Green", curses.COLOR_GREEN),
+            ("Yellow", curses.COLOR_YELLOW),
+            ("Blue", curses.COLOR_BLUE),
+            ("Magenta", curses.COLOR_MAGENTA),
+            ("Cyan", curses.COLOR_CYAN),
+            ("White", curses.COLOR_WHITE)
+        ]
+        
+        for name, color in colors:
+            self.add_log(f"Testing border color: {name}")
+            curses.init_pair(COLOR_BORDER, color, -1)
+            self.redraw_ui()
+            time.sleep(1)
+            
+        # Reset to default
+        curses.init_pair(COLOR_BORDER, curses.COLOR_WHITE, -1)
+        self.redraw_ui()
+        self.add_log("Border color test complete")
+    
+    def redraw_ui(self):
+        """Force redraw of all UI components"""
+        try:
+            with self.lock:
+                self.stdscr.erase()
+                self.status_bar.render(None)
+                self.log_window.render(None)
+                self.now_playing.render(None)
+                self.stdscr.refresh()
+        except Exception as e:
+            self.add_log(f"Error in redraw: {str(e)}")
+    
     def update_ui_loop(self):
         """UI update loop running in a separate thread"""
         # Use consistent animation interval of 0.04s for all updates
         animation_interval = 0.04
+        resize_check_counter = 0
         
         try:
             while not self.shutdown_flag.is_set():
                 try:
-                    # Check if there's a resize event
-                    if self.resize_event.is_set():
-                        self.resize_ui()
+                    # Check for a resize event (every 5 frames to avoid constant checking)
+                    resize_check_counter += 1
+                    if resize_check_counter >= 5:
+                        resize_check_counter = 0
+                        if self.resize_event.is_set() or self.check_resize():
+                            self.resize_ui()
                     
                     # Always use the animation interval for smooth animations
                     interval = animation_interval
@@ -967,63 +1052,12 @@ class SpotipyUI:
                 self.add_log(f"UI loop crashed: {str(e)}")
             except:
                 pass
-    
-    def add_log(self, message):
-        """Add a log message to the log window"""
-        self.log_window.add_log(message)
-        self.log_window.render(None)
-        self.stdscr.refresh()
-    
-    def set_client_status(self, connected, client_id=""):
-        """Set the client connection status"""
-        self.status_bar.set_client_status(connected, client_id)
-        self.status_bar.render(None)
-        self.stdscr.refresh()
-    
-    def shutdown(self):
-        """Shutdown the UI"""
-        self.running = False
-        self.shutdown_flag.set()
-        time.sleep(0.2)  # Give update thread time to exit
-    
-    def test_border_colors(self):
-        """Test cycling through border colors"""
-        self.add_log("Testing border colors...")
-        colors = [
-            ("Red", curses.COLOR_RED),
-            ("Green", curses.COLOR_GREEN),
-            ("Yellow", curses.COLOR_YELLOW),
-            ("Blue", curses.COLOR_BLUE),
-            ("Magenta", curses.COLOR_MAGENTA),
-            ("Cyan", curses.COLOR_CYAN),
-            ("White", curses.COLOR_WHITE)
-        ]
-        
-        for name, color in colors:
-            self.add_log(f"Testing border color: {name}")
-            curses.init_pair(COLOR_BORDER, color, -1)
-            self.redraw_ui()
-            time.sleep(1)
-            
-        # Reset to default
-        curses.init_pair(COLOR_BORDER, curses.COLOR_WHITE, -1)
-        self.redraw_ui()
-        self.add_log("Border color test complete")
-    
-    def redraw_ui(self):
-        """Force redraw of all UI components"""
-        try:
-            with self.lock:
-                self.stdscr.erase()
-                self.status_bar.render(None)
-                self.log_window.render(None)
-                self.now_playing.render(None)
-                self.stdscr.refresh()
-        except Exception as e:
-            self.add_log(f"Error in redraw: {str(e)}")
 
 def curses_main(stdscr):
     global UI, API, CLIENT
+    
+    # Enable special key detection in curses
+    stdscr.keypad(True)
     
     # Initialize UI
     UI = SpotipyUI(stdscr, CLIENT)
@@ -1038,6 +1072,8 @@ def curses_main(stdscr):
                 UI.resize_ui()  # Use same function for manual refresh
             elif key == ord('c'):  # Test cycling colors with 'c'
                 UI.test_border_colors()
+            elif key == curses.KEY_RESIZE:  # Handle terminal resize
+                UI.handle_resize()
             elif key == ord('1'):  # Red
                 curses.init_pair(17, curses.COLOR_RED, -1)
                 UI.redraw_ui()
@@ -1081,8 +1117,6 @@ def curses_main(stdscr):
                         UI.add_log(f"Error: {str(e)}")
                 else:
                     UI.add_log("API client not available")
-            elif key == curses.KEY_RESIZE:  # Add explicit handling for resize key
-                UI.resize_ui()
         except KeyboardInterrupt:
             break
     
