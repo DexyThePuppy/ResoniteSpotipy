@@ -2,9 +2,33 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 from datetime import datetime
+import colorama
+from colorama import Fore, Back, Style
+
+# Initialize colorama
+colorama.init(autoreset=True)
 
 def current_time():
-    return f"{datetime.now():%d.%m.%y (%H:%M:%S)}"
+    return f"[{Fore.CYAN}{Style.BRIGHT}{datetime.now():%H:%M:%S}{Style.RESET_ALL}]"
+
+# Text formatting functions
+def info(text):
+    return f"{Fore.GREEN}{text}{Style.RESET_ALL}"
+
+def warn(text):
+    return f"{Fore.YELLOW}{Style.BRIGHT}{text}{Style.RESET_ALL}"
+
+def error(text):
+    return f"{Fore.RED}{Style.BRIGHT}{text}{Style.RESET_ALL}"
+
+def success(text):
+    return f"{Fore.GREEN}{Style.BRIGHT}{text}{Style.RESET_ALL}"
+
+def highlight(text):
+    return f"{Fore.MAGENTA}{Style.BRIGHT}{text}{Style.RESET_ALL}"
+
+def client_id(id):
+    return f"[{Fore.BLUE}{Style.BRIGHT}{id[:8]}{Style.RESET_ALL}]"
 
 class APIClient(object):
     '''
@@ -28,7 +52,7 @@ class APIClient(object):
             The scopes you want to use for the API
         '''
         self._api = spotipy.Spotify(auth_manager=SpotifyOAuth(client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri, scope=scope))
-        print(current_time(), "Connected to Spotify")
+        print(current_time(), success("Connected to Spotify"))
     
     def find_device(self, *device_id: str):
         '''
@@ -45,7 +69,7 @@ class APIClient(object):
         device_list: list = self._api.devices()['devices']
         
         if (not device_list):
-            print("[ERROR] No active devices found")
+            print(error("[ERROR] No active devices found"))
         else:
             if (len(device_list) == 1):
                 self._device = self._api.devices()['devices'][0]['id']
@@ -55,17 +79,30 @@ class APIClient(object):
                 run: bool = True
                 while (run):
                     for (i, x) in enumerate(device_list):
-                        print(f"[{i}]: Device: {x['name']}")
-                    _ = int(input("Please enter the index of the device to use: "))
+                        print(f"[{highlight(str(i))}]: Device: {info(x['name'])}")
+                    _ = int(input(f"Please enter the {highlight('index')} of the device to use: "))
                     
                     if (device_list[_]['id']):
                         self._device = device_list[_]['id']
                         run = False
                         break
                     else:
-                        print("[ERROR] Invalid index")
+                        print(error("[ERROR] Invalid index"))
 
-            print(f"Active device: {self._device}") if self._debug else None
+            print(f"Active device: {success(self._device)}") if self._debug else None
+    
+    def get_current_playback_full(self):
+        """
+        Get the full current playback information directly from Spotify API.
+        
+        :return:
+            Full playback information dictionary or None if no active playback
+        """
+        try:
+            return self._api.current_playback()
+        except Exception as e:
+            print(error(f"[ERROR] Failed to get current playback: {str(e)}")) if self._debug else None
+            return None
     
     def run_action(self, action: callable, *args):
         '''
@@ -82,9 +119,9 @@ class APIClient(object):
         
         try:
             action(*args, self._device) if args else action(device_id = self._device)
-            print(f"[SUCCESS] Action '{action}' ran successfully") if self._debug else None
+            print(f"[{success('SUCCESS')}] Action '{highlight(str(action))}' ran successfully") if self._debug else None
         except:
-            print("[ERROR] Device not found")
+            print(error("[ERROR] Device not found"))
     
     def get_playback_states(self, shuffle = "read", repeat = "read", playing = "read") -> str:
         '''

@@ -1,49 +1,251 @@
 import asyncio as aio
 import websockets as ws
 import spotipy as sp
-
-from APIClient import APIClient # The class that handles the Spotify API and custom functions
-
+import signal
+import curses
+import sys
+import os
+import time
+import requests
 from datetime import datetime
+import threading
+
+from APIClient import APIClient  # The class that handles the Spotify API and custom functions
+from resonite_ui import SpotipyUI
+# Import the color extraction module
+import spotify_color
+
+# Global variables
+API: sp.Spotify = None
+CLIENT: APIClient = None
+PORT: int = 0000
+UI = None
+DEBUG = False
+# Cache for canvas and artist data to avoid redundant checks
+TRACK_CACHE = {}
+CURRENT_TRACK_ID = None
+
+def get_spotify_canvas(track_id):
+    """Fetch Spotify Canvas video for a given track ID"""
+    # Check if we already have cached data for this track
+    if track_id in TRACK_CACHE and "canvas_checked" in TRACK_CACHE[track_id]:
+        return TRACK_CACHE[track_id].get("canvas_data")
+        
+    try:
+        url = f"https://spotifycanvas-indol.vercel.app/api/canvas?trackId={track_id}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if data and "canvasesList" in data and len(data["canvasesList"]) > 0:
+                canvas_data = data["canvasesList"][0]
+                result = {
+                    "canvasUrl": canvas_data.get("canvasUrl"),
+                    "artistImgUrl": canvas_data.get("artist", {}).get("artistImgUrl")
+                }
+                
+                # Initialize track cache if needed
+                if track_id not in TRACK_CACHE:
+                    TRACK_CACHE[track_id] = {}
+                
+                # Store the canvas data and mark as checked
+                TRACK_CACHE[track_id]["canvas_data"] = result
+                TRACK_CACHE[track_id]["canvas_checked"] = True
+                
+                return result
+    except Exception as e:
+        if UI:
+            UI.add_log(f"[ERROR] Error fetching canvas: {str(e)}")
+    
+    # Mark as checked even if no data found
+    if track_id not in TRACK_CACHE:
+        TRACK_CACHE[track_id] = {}
+    TRACK_CACHE[track_id]["canvas_checked"] = True
+    TRACK_CACHE[track_id]["canvas_data"] = None
+    
+    return None
+
+def get_artist_image(artist_id):
+    """Get artist image from Spotify API with caching"""
+    # Check cache first
+    if artist_id in TRACK_CACHE and "artist_image_checked" in TRACK_CACHE[artist_id]:
+        return TRACK_CACHE[artist_id].get("artist_image")
+        
+    try:
+        artist_data = API.artist(artist_id)
+        if artist_data and artist_data.get("images") and len(artist_data["images"]) > 0:
+            artist_img_url = artist_data["images"][0]["url"]
+            
+            # Initialize artist cache if needed
+            if artist_id not in TRACK_CACHE:
+                TRACK_CACHE[artist_id] = {}
+            
+            # Store the artist image and mark as checked
+            TRACK_CACHE[artist_id]["artist_image"] = artist_img_url
+            TRACK_CACHE[artist_id]["artist_image_checked"] = True
+            
+            return artist_img_url
+    except Exception as e:
+        if UI:
+            UI.add_log(f"[ERROR] Error fetching artist image: {str(e)}")
+    
+    # Mark as checked even if no data found
+    if artist_id not in TRACK_CACHE:
+        TRACK_CACHE[artist_id] = {}
+    TRACK_CACHE[artist_id]["artist_image_checked"] = True
+    TRACK_CACHE[artist_id]["artist_image"] = None
+    
+    return None
+
 def current_time():
-    return f"{datetime.now():%d.%m.%y (%H:%M:%S)}"
+    return f"[{datetime.now():%H:%M:%S}]"
 
-import argparse as arg
-parser = arg.ArgumentParser(description="The websocket server for the Resonite Spotipy project")
-parser.add_argument("-d", "--debug", dest="debug", action="store_true", help="Prints debug messages", default=False)
-args = parser.parse_args()
-
-DEBUG: bool = args.debug # A variable for the program to know if it should print debug messages into the console
-
-#--------------------------------------------------------------
-
-DISPLAY: str = "" # A variable for the websocket to know what is displayed in the Spotify menu
+# Reads data from the IDs.txt file and parses them to be used in the API
+def connect_to_spotify():
+    global API, CLIENT, PORT
+    
+    results: list[str | int] = ["", "", "", 0]
+    indices: list[int]       = [1, 2, 5, 9]
+    
+    with open("IDs.txt") as file:
+        lines: list[str] = file.readlines()
+    
+    for i in range(0, 4):
+        results[i] = lines[indices[i]].split(" ")[2].removesuffix("\n").replace("<", "").replace(">", "")
+        i += 1
+    PORT = int(results[3])
+    
+    if (str(results[3]) in results[2]):
+        raise Exception(f"Invalid port! ({PORT = }). Use a different port than the one used by the callback URI.")
+    
+    _ = """user-library-modify,user-library-read,user-read-currently-playing,user-read-playback-position,
+            user-read-playback-state,user-modify-playback-state,app-remote-control,streaming,playlist-read-private,
+            playlist-modify-private,playlist-modify-public,playlist-read-collaborative"""
+    CLIENT = APIClient(results[0], results[1], results[2], _)
+    API = CLIENT._api
+    CLIENT._debug = DEBUG
+    
+    CLIENT.find_device()
+    
+    return True
 
 # Displays current information about the currently playing track and/or the playback states
 def display_current_info(received: str) -> str:
+    global CURRENT_TRACK_ID
     payload: str = ""
     
     match (received):
         case "current_info": # Used for getting the currently playing track and the playback states
             try:
-                _ = API.current_user_playing_track()['item'] # Throws an error if there's no currently playing track
+                track_data = API.current_user_playing_track()
+                track_item = track_data['item'] # Throws an error if there's no currently playing track
+                track_id = track_item['id']
                 
-                payload = CLIENT.get_track_data(API.current_user_playing_track(), ws_call="current") + "\n" + CLIENT.get_playback_states()
-            except:
+                # Track change detection - only log new info if track changed
+                track_changed = CURRENT_TRACK_ID != track_id
+                CURRENT_TRACK_ID = track_id
+                
+                # Get canvas data if available
+                canvas_data = get_spotify_canvas(track_id)
+                if track_changed:
+                    if canvas_data and canvas_data.get("canvasUrl"):
+                        if UI:
+                            UI.add_log(f"Canvas URL found: {canvas_data['canvasUrl'][:30]}...")
+                    else:
+                        if UI:
+                            UI.add_log("No canvas found for current playing song")
+                
+                # Get artist image
+                artist_id = track_item['artists'][0]['id']
+                artist_img_url = get_artist_image(artist_id)
+                if track_changed and artist_img_url:
+                    if UI:
+                        UI.add_log(f"Artist image URL: {artist_img_url[:30]}...")
+                
+                # Get track color
+                if track_changed and track_item.get('album') and track_item['album'].get('images'):
+                    album_art_url = track_item['album']['images'][0]['url']
+                    color_hex = spotify_color.get_dominant_color(album_art_url)
+                    if color_hex:
+                        if UI:
+                            UI.add_log(f"Track color: {color_hex}")
+                
+                payload = CLIENT.get_track_data(track_data, ws_call="current") + "\n" + CLIENT.get_playback_states()
+                
+                # Append canvas and artist data if available
+                if canvas_data and canvas_data.get("canvasUrl"):
+                    payload += f"\nCANVAS_URL:{canvas_data['canvasUrl']}"
+                if artist_img_url:
+                    payload += f"\nARTIST_IMG_URL:{artist_img_url}"
+                if track_item.get('album') and track_item['album'].get('images'):
+                    album_art_url = track_item['album']['images'][0]['url']
+                    color_hex = spotify_color.get_dominant_color(album_art_url)
+                    if color_hex:
+                        payload += f"\nTRACK_COLOR:{color_hex}"
+                
+            except Exception as e:
+                if UI:
+                    UI.add_log(f"[ERROR] No current song active: {str(e)}")
                 payload = "[ERROR] No current song active"
         
         case "current_track":
             try:
-                _ = API.current_user_playing_track()['item'] # Throws an error if there's no currently playing track
+                track_data = API.current_user_playing_track()
+                track_item = track_data['item'] # Throws an error if there's no currently playing track
+                track_id = track_item['id']
                 
-                payload = CLIENT.get_track_data(API.current_user_playing_track(), ws_call="current")
+                # Track change detection - only log new info if track changed
+                track_changed = CURRENT_TRACK_ID != track_id
+                CURRENT_TRACK_ID = track_id
+                
+                # Get canvas data if available
+                canvas_data = get_spotify_canvas(track_id)
+                if track_changed:
+                    if canvas_data and canvas_data.get("canvasUrl"):
+                        if UI:
+                            UI.add_log(f"Canvas URL found: {canvas_data['canvasUrl']}")
+                    else:
+                        if UI:
+                            UI.add_log("No canvas found for current playing song")
+                
+                # Get artist image
+                artist_id = track_item['artists'][0]['id']
+                artist_img_url = get_artist_image(artist_id)
+                if track_changed and artist_img_url:
+                    if UI:
+                        UI.add_log(f"Artist image URL: {artist_img_url}")
+                
+                # Get track color
+                if track_changed and track_item.get('album') and track_item['album'].get('images'):
+                    album_art_url = track_item['album']['images'][0]['url']
+                    color_hex = spotify_color.get_dominant_color(album_art_url)
+                    if color_hex:
+                        if UI:
+                            UI.add_log(f"Track color: {color_hex}")
+                
+                payload = CLIENT.get_track_data(track_data, ws_call="current")
+                
+                # Append canvas and artist data if available
+                if canvas_data and canvas_data.get("canvasUrl"):
+                    payload += f"\nCANVAS_URL:{canvas_data['canvasUrl']}"
+                if artist_img_url:
+                    payload += f"\nARTIST_IMG_URL:{artist_img_url}"
+                if track_item.get('album') and track_item['album'].get('images'):
+                    album_art_url = track_item['album']['images'][0]['url']
+                    color_hex = spotify_color.get_dominant_color(album_art_url)
+                    if color_hex:
+                        payload += f"\nTRACK_COLOR:{color_hex}"
+                
             except:
+                if UI:
+                    UI.add_log("No current song active")
                 payload = "[ERROR] No current song active"
         
         case "current_states":
             try:
                 payload = CLIENT.get_playback_states()
             except:
+                if UI:
+                    UI.add_log("Error getting playback states")
                 payload = "[ERROR] Error getting playback states"
     
     return payload
@@ -56,9 +258,12 @@ def modify_current_track(received: str, data: str) -> str:
         case "next":
             try:
                 CLIENT.run_action(API.next_track)
-                
+                if UI:
+                    UI.add_log("Next track")
                 payload = "[NEXT SONG]"
-            except:
+            except Exception as e:
+                if UI:
+                    UI.add_log(f"[ERROR] Error going to next song: {str(e)}")
                 payload = "[ERROR] Error going to next song"
         
         case "previous":
@@ -68,8 +273,12 @@ def modify_current_track(received: str, data: str) -> str:
                 else:
                     CLIENT.run_action(API.previous_track)
                 
+                if UI:
+                    UI.add_log("Previous track")
                 payload = "[PREVIOUS SONG]"
-            except:
+            except Exception as e:
+                if UI:
+                    UI.add_log(f"[ERROR] Error going to previous song: {str(e)}")
                 payload = "[ERROR] Error going to previous song"
         
         case "play":
@@ -83,21 +292,31 @@ def modify_current_track(received: str, data: str) -> str:
                         case "search":
                             if (play_data[0] == "track"):
                                 API.start_playback(uris=[play_data[1]]) # Plays just the selected song
+                                if UI:
+                                    UI.add_log(f"Playing selected searched song")
                                 payload = "[PLAY] Played selected searched song"
                         
                         case "queue":
                             API.start_playback(context_uri=API.currently_playing()["context"]["uri"], offset={"uri": play_data[1]}) # Plays song in the queue that was clicked on
+                            if UI:
+                                UI.add_log(f"Playing selected song in queue")
                             payload = "[PLAY] Played selected song in queue"
                         
                         case "playlist" | "album":
                             if (len(play_data) == 3):
                                 API.start_playback(context_uri=play_data[1], offset={"uri": play_data[2]}) # Plays song in the playlist/album that was clicked on
+                                if UI:
+                                    UI.add_log(f"Playing selected song in playlist/album")
                                 payload = "[PLAY] Played selected song in playlist/album"
                             else:
                                 API.start_playback(context_uri=play_data[1]) # Plays the playlist/album that was clicked on
+                                if UI:
+                                    UI.add_log(f"Playing selected playlist/album")
                                 payload = "[PLAY] Played selected playlist/album"
                         
                 except:
+                    if UI:
+                        UI.add_log("Error playing song")
                     payload = "[ERROR] Error playing song"
 
     return payload
@@ -117,8 +336,13 @@ def modify_playback_states(received: str) -> str:
         try:
             CLIENT.run_action(API.pause_playback) if _ else CLIENT.run_action(API.start_playback)
             
+            if UI:
+                UI.add_log(f"Playback {'paused' if _ else 'resumed'}")
+            
             payload = CLIENT.get_playback_states(playing=playing)
-        except:
+        except Exception as e:
+            if UI:
+                UI.add_log(f"[ERROR] Error {'pausing' if _ else 'resuming'} playback: {str(e)}")
             payload = "[ERROR] Error pausing/resuming playback"
              
     match (received):       
@@ -127,8 +351,13 @@ def modify_playback_states(received: str) -> str:
                 shuffle: bool = API.current_playback()["shuffle_state"]
                 CLIENT.run_action(API.shuffle, not shuffle) # Throws an error if it can't change the shuffle state
                 
+                if UI:
+                    UI.add_log(f"Shuffle {'disabled' if shuffle else 'enabled'}")
+                
                 payload = CLIENT.get_playback_states(shuffle=str(not shuffle))
-            except:
+            except Exception as e:
+                if UI:
+                    UI.add_log(f"[ERROR] Error changing shuffle state: {str(e)}")
                 payload = "[ERROR] Error changing shuffle state"
         
         case "repeat":
@@ -138,8 +367,13 @@ def modify_playback_states(received: str) -> str:
                 change: str       = states[(states.index(repeat) + 1) if (repeat != "off") else 0]
                 CLIENT.run_action(API.repeat, change) # Throws an error if it can't change the repeat state
 
+                if UI:
+                    UI.add_log(f"Repeat mode: {change.capitalize()}")
+
                 payload = CLIENT.get_playback_states(repeat=change.capitalize())
             except:
+                if UI:
+                    UI.add_log("Error changing repeat state")
                 payload = "[ERROR] Error changing repeat state"
     
     return payload
@@ -160,6 +394,9 @@ def list_stuff(received: str, data: str) -> str:
                 search_data: list[str] = data.split(" ") # Format: "<type> <search query>"
                 
                 if (len(search_data) > 1):
+                    if UI:
+                        UI.add_log(f"Searching for {search_data[0]}: {' '.join(search_data[1:])}")
+                    
                     search_results = API.search(" ".join(search_data[1:]), type=search_data[0], market="US") # Valid arguments for type: "track", "album", "track,album"
                     
                     search_split = search_data[0].split(",")
@@ -173,6 +410,8 @@ def list_stuff(received: str, data: str) -> str:
                     else:
                         payload = CLIENT.get_results(search_results[f"{search_data[0]}s"], ws_call="search")
             except:
+                if UI:
+                    UI.add_log("Error searching")
                 payload = "[ERROR] Error searching"
             
         case "list_queue":
@@ -180,8 +419,12 @@ def list_stuff(received: str, data: str) -> str:
                 _ = API.queue()["queue"][0] # Throws an error if there's no queue available
                 
                 DISPLAY = "queue"
+                if UI:
+                    UI.add_log("Listing queue")
                 payload = CLIENT.get_results(API.queue(), ws_call="queue", keyword="queue")
             except:
+                if UI:
+                    UI.add_log("No queue found")
                 payload = "[ERROR] No queue found"
     
     return payload
@@ -198,8 +441,14 @@ def display_info(received: str, data: str) -> str:
                 DISPLAY = "album"
                 _ = API.album_tracks(data)["items"][0] # Throws an error if there are no tracks in the album
             
-                payload = CLIENT.display_album(API.album(data))
+                album_info = API.album(data)
+                if UI:
+                    UI.add_log(f"Displaying album: {album_info['name']}")
+                
+                payload = CLIENT.display_album(album_info)
             except:
+                if UI:
+                    UI.add_log("Error loading album tracks")
                 payload = "[ERROR] Error loading album tracks"
 
         case "display_playlist":
@@ -210,32 +459,49 @@ def display_info(received: str, data: str) -> str:
                 if ("collection" in spl[0]):
                     _ = API.current_user_saved_tracks()["items"][0] # Throws an error if there are no tracks in their Liked Songs
                     
+                    if UI:
+                        UI.add_log("Displaying Liked Songs")
+                    
                     payload = CLIENT.display_playlist(API.current_user_saved_tracks(), offset=int(spl[1]), uri=spl[0])
                 else:
-                    _ = API.playlist(playlist_id=spl[0])["tracks"]["items"] # Throws an error if there are no tracks in the playlist
+                    playlist_info = API.playlist(playlist_id=spl[0])
+                    _ = playlist_info["tracks"]["items"] # Throws an error if there are no tracks in the playlist
+                    
+                    if UI:
+                        UI.add_log(f"Displaying playlist: {playlist_info['name']}")
                 
-                    payload = CLIENT.display_playlist(API.playlist(playlist_id=spl[0]), offset=int(spl[1]))
+                    payload = CLIENT.display_playlist(playlist_info, offset=int(spl[1]))
             except:
+                if UI:
+                    UI.add_log("Error loading playlist tracks")
                 payload = "[ERROR] Error loading playlist tracks"
         
         case "display_artist":
             # Data format: <artist uri>
             DISPLAY = "artist"
             try:
+                artist_info = API.artist(data)
                 _ = API.artist_top_tracks(data)["tracks"][0] # Throws an error if the artist has no tracks
                 
-                payload = CLIENT.display_artist(API.artist(data), API.artist_top_tracks(data), API.artist_albums(data))
+                if UI:
+                    UI.add_log(f"Displaying artist: {artist_info['name']}")
+                
+                payload = CLIENT.display_artist(artist_info, API.artist_top_tracks(data), API.artist_albums(data))
             except:
+                if UI:
+                    UI.add_log("Error loading artist")
                 payload = "[ERROR] Error loading artist"
     
     return payload
 
 async def socket(websocket: ws.WebSocketClientProtocol):
-    global DISPLAY
+    global DISPLAY, UI
     
     # Initializing the websocket
     ID = str(websocket.id)
-    print(f"{current_time()} Client {ID[:8]} connected!")
+    if UI:
+        UI.add_log(f"Client {ID[:8]} connected!")
+        UI.set_client_status(True, ID[:8])
     
     await websocket.send(CLIENT.get_playback_states())
     
@@ -248,11 +514,13 @@ async def socket(websocket: ws.WebSocketClientProtocol):
             
             if (len(parsed) < 2):
                 received = message
-                print(f"[{ID[:8]}] {current_time()} Command received: {received}")
+                if UI:
+                    UI.add_log(f"Client {ID[:8]} command: {received}")
             else:
                 received = parsed[0]
                 data     = " ".join(parsed[1:])
-                print(f"[{ID[:8]}] {current_time()} Command received: {received} | {data}")
+                if UI:
+                    UI.add_log(f"Client {ID[:8]} command: {received} {data[:20] + '...' if len(data) > 20 else data}")
 
             payload: str = ""
             
@@ -271,56 +539,140 @@ async def socket(websocket: ws.WebSocketClientProtocol):
             elif (received in ["display_album", "display_playlist", "display_artist"]):
                 payload = display_info(received, data)
             
+            elif (received in ["get_canvas_video", "get_artist_image", "get_track_color"]):
+                try:
+                    track_data = API.current_user_playing_track()
+                    track_id = track_data['item']['id']
+                    
+                    if received == "get_canvas_video":
+                        canvas_data = get_spotify_canvas(track_id)
+                        if canvas_data and canvas_data.get("canvasUrl"):
+                            payload = f"CANVAS_URL:{canvas_data['canvasUrl']}"
+                        else:
+                            payload = "NO_CANVAS_AVAILABLE"
+                    
+                    elif received == "get_artist_image":
+                        artist_id = track_data['item']['artists'][0]['id']
+                        artist_img_url = get_artist_image(artist_id)
+                        if artist_img_url:
+                            payload = f"ARTIST_IMG_URL:{artist_img_url}"
+                        else:
+                            payload = "NO_ARTIST_IMAGE_AVAILABLE"
+                    
+                    elif received == "get_track_color":
+                        # Get album art URL from current track
+                        if track_data['item']['album']['images']:
+                            album_art_url = track_data['item']['album']['images'][0]['url']
+                            # Get dominant color in hex format
+                            color_hex = spotify_color.get_dominant_color(album_art_url)
+                            if color_hex:
+                                payload = f"TRACK_COLOR:{color_hex}"
+                            else:
+                                payload = "NO_COLOR_AVAILABLE"
+                        else:
+                            payload = "NO_ALBUM_ART_AVAILABLE"
+                
+                except Exception as e:
+                    if UI:
+                        UI.add_log(f"Error processing media request: {str(e)}")
+                    payload = f"[ERROR] {str(e)}"
+            
             else:
+                if UI:
+                    UI.add_log(f"Unknown command: {received}")
                 payload = "[ERROR] Unknown command"
         
-            print(f"[{ID[:8]}] {current_time()} Response sent: {payload}") if DEBUG and payload != "" else None
+            if DEBUG and payload != "":
+                if UI:
+                    UI.add_log(f"Response sent: {payload}")
+                    
             await websocket.send(payload)
             
-    except:
-        print(current_time(), "Connection error with client.")
-        
-#--------------------------------------------------------------
+    except Exception as e:
+        if UI:
+            UI.add_log(f"[ERROR] Connection error with client {ID[:8]}: {str(e)}")
+            UI.set_client_status(False)
 
-API: sp.Spotify = None
-CLIENT: APIClient = None
-PORT: int = 0000
+# Variable to store the current screen mode we're displaying
+DISPLAY: str = ""
 
-# Reads data from the IDs.txt file and parses them to be used in the API
-def connect_to_spotify():
-    global API, CLIENT, PORT
+def curses_main(stdscr):
+    global UI, API, CLIENT
     
-    results: list[str | int] = ["", "", "", 0]
-    indices: list[int]       = [1, 2, 5, 9]
+    # Initialize UI
+    UI = SpotipyUI(stdscr, CLIENT)
     
-    with open("IDs.txt") as file:
-        lines: list[str] = file.readlines()
+    # Wait for user to quit
+    while True:
+        try:
+            key = stdscr.getch()
+            if key == ord('q'):  # Quit on 'q'
+                break
+            elif key == ord('r'):  # Refresh on 'r'
+                stdscr.clear()
+                stdscr.refresh()
+        except KeyboardInterrupt:
+            break
     
-    for i in range(0, 4):
-        results[i] = lines[indices[i]].split(" ")[2].removesuffix("\n").replace("<", "").replace(">", "")
-        i += 1
-    PORT = int(results[3])
-    
-    if (str(results[3]) in results[2]):
-        raise Exception(f"Invalid port! ({PORT = }). Use a different port than the one used by the callback URI.")
-    
-    print(results) if DEBUG else None
-    
-    _ = """user-library-modify,user-library-read,user-read-currently-playing,user-read-playback-position,
-            user-read-playback-state,user-modify-playback-state,app-remote-control,streaming,playlist-read-private,
-            playlist-modify-private,playlist-modify-public,playlist-read-collaborative"""
-    CLIENT = APIClient(results[0], results[1], results[2], _)
-    API = CLIENT._api
-    CLIENT._debug = DEBUG
-    
-    CLIENT.find_device()
+    # Shutdown UI
+    if UI:
+        UI.shutdown()
 
 async def main():
-    connect_to_spotify()
-    print(current_time(), "Booted up. Awaiting interaction...")
+    global API, CLIENT, UI
     
-    async with ws.serve(socket, 'localhost', PORT):
-        await aio.Future()
+    # Create a shutdown event
+    shutdown_event = aio.Event()
+    
+    # Define a shutdown handler
+    def shutdown_signal(signal, frame):
+        if UI:
+            UI.add_log("Shutting down...")
+        shutdown_event.set()
+    
+    # Register the signal handlers
+    signal.signal(signal.SIGINT, shutdown_signal)
+    signal.signal(signal.SIGTERM, shutdown_signal)
+    
+    # Connect to Spotify
+    if not connect_to_spotify():
+        print("Failed to connect to Spotify")
+        return
+        
+    # Start the UI in a separate thread
+    ui_thread = threading.Thread(target=lambda: curses.wrapper(curses_main))
+    ui_thread.daemon = True
+    ui_thread.start()
+    
+    # Start the server
+    server = await ws.serve(socket, 'localhost', PORT)
+    
+    # Wait for the shutdown event
+    try:
+        await shutdown_event.wait()
+    finally:
+        # Clean shutdown
+        server.close()
+        await server.wait_closed()
+        
+        if UI:
+            UI.add_log("Server has been shut down.")
+            time.sleep(0.5)  # Give UI time to display the message
+            UI.shutdown()
 
 if __name__ == '__main__':
-    aio.run(main())
+    import argparse as arg
+    parser = arg.ArgumentParser(description="The websocket server for the Resonite Spotipy project")
+    parser.add_argument("-d", "--debug", dest="debug", action="store_true", help="Prints debug messages", default=False)
+    args = parser.parse_args()
+    
+    DEBUG = args.debug
+    
+    try:
+        aio.run(main())
+    except KeyboardInterrupt:
+        # Already handled
+        pass
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        sys.exit(1)

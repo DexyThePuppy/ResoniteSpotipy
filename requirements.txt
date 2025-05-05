@@ -2,3 +2,9 @@ websockets
 asyncio
 spotipy
 pyinstaller
+colorama
+pillow
+numpy
+scikit-learn
+joblib
+requests

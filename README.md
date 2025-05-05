@@ -6,8 +6,17 @@ Here's the Resonite record link for the Resonite Spotipy audio player:
 `resrec:///U-JayKub/R-CAF0B1B9598EF23797BE641C09DBBD3905EA75224EBD0F7F08F2AD4B61579001`
 
 ## Prerequisites
-You'll need these Python packages: *websockets*, *asyncio*, *spotipy*. You'll also need Python 3.9 at least.
-- To install these, run this command: ```pip install websockets asyncio spotipy```
+You'll need these Python packages: *websockets*, *asyncio*, *spotipy*, *pillow*, *numpy*, *scikit-learn*, *joblib*, *requests*.
+- To install these, run this command: ```pip install websockets asyncio spotipy pillow numpy scikit-learn joblib requests```
+- Or you can use the included requirements.txt: ```pip install -r requirements.txt```
+
+## Features
+- Connect to Spotify's API using OAuth authentication
+- Control playback (play, pause, skip, volume)
+- Browse and play from playlists and albums
+- View currently playing tracks with album artwork
+- Dynamic UI colors based on album artwork (terminal borders change color to match each album)
+- Terminal User Interface (TUI) with album details and playback progress
 
 ## How to setup your Spotify application
 **You'll need Spotify Premium to be able to do this!**
@@ -35,6 +44,7 @@ You'll need these Python packages: *websockets*, *asyncio*, *spotipy*. You'll al
 | Displaying album tracks & playing a specific album track | ✔️ Completed | v1.1 |
 | Displaying playlist tracks & playing a specific playlist track | ✔️ Completed | v1.1 |
 | Player for only displaying currently playing song | ✔️ Completed | v1.1 |
-| Searching artists & displaying artist profile | 📝 Planned | v1.2 |
-| UI overhaul for the player | 📝 Planned | v1.2? |
-| Song queueing system on the player | 📝 Planned | v??? |
+| Dynamic UI colors based on album artwork | ✔️ Completed | v1.2 |
+| Searching artists & displaying artist profile | 📝 Planned | v1.3 |
+| UI overhaul for the player | 📝 Planned | v1.3? |
+| Song queueing system on the player | �� Planned | v??? |

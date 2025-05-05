@@ -4,3 +4,12 @@ build
 *.spec
 *.zip
 .vscode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.cache
+color_debug.log
+*.png
+!assets/*.png
+kmeans_model.joblib
