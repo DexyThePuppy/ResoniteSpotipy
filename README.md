@@ -6,7 +6,7 @@ A websocket server for talking with the Spotify API with a Resonite websocket cl
 ## Terminal User Interface
 The application features a colorful and animated terminal UI that displays real-time information:
 
-![Terminal UI Showcase](Screenshot%202025-05-05%20045601.png)
+![Terminal UI Showcase](img/Screenshot%202025-05-05%20045601.png)
 
 Here's the Resonite record link for the Resonite Spotipy audio player:
 `resrec:///U-JayKub/R-CAF0B1B9598EF23797BE641C09DBBD3905EA75224EBD0F7F08F2AD4B61579001`
