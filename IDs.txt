@@ -1,6 +1,6 @@
 # You'll find your Client ID and Client Secret in your Spotify application developer panel under Settings.
-Client ID: 0f938c11fa3a424a94bfe61ad0becb46
-Client Secret: 96ee9f8d822746cc878a4f8da5679d9f
+Client ID: ClientIdHere
+Client Secret: ClientHere
 
 # Under the same settings menu you'll find a "Redirect" section, which lets you hook up a link for the API to redirect you to once it's connected
 Redirect URI: http://localhost:8000/callback
