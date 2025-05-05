@@ -13,3 +13,4 @@ color_debug.log
 *.png
 !assets/*.png
 kmeans_model.joblib
+spotify_cache/cache.db

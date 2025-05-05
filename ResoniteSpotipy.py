@@ -99,6 +99,49 @@ def get_artist_image(artist_id):
 def current_time():
     return f"[{datetime.now():%H:%M:%S}]"
 
+def check_ids_file():
+    """Check if IDs.txt exists and create it from template if missing"""
+    if not os.path.exists("IDs.txt"):
+        # IDs.txt doesn't exist, create it from template
+        template_content = """# You'll find your Client ID and Client Secret in your Spotify application developer panel under Settings.
+Client ID: ClientIdHere
+Client Secret: SecretHere
+
+# Under the same settings menu you'll find a "Redirect" section, which lets you hook up a link for the API to redirect you to once it's connected
+Redirect URI: http://localhost:8000/callback
+
+# The port ID allows you to choose what port this websocket will connect through
+# You MUST have the same port ID hooked up in Resonite as you put in here!
+Port ID: 6969"""
+
+        try:
+            with open("IDs.txt", "w") as f:
+                f.write(template_content)
+            print("\n" + "="*60)
+            print("ATTENTION: IDs.txt was not found and has been created.")
+            print("You need to edit this file with your Spotify API credentials.")
+            print("The program will now exit. Please edit IDs.txt and restart.")
+            print("="*60 + "\n")
+            input("Press Enter to exit...")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error creating IDs.txt: {str(e)}")
+            print("Please create this file manually with your Spotify credentials.")
+            input("Press Enter to exit...")
+            sys.exit(1)
+    else:
+        # Check if IDs.txt contains default values
+        with open("IDs.txt", "r") as f:
+            content = f.read()
+            if "ClientIdHere" in content or "SecretHere" in content:
+                print("\n" + "="*60)
+                print("ATTENTION: IDs.txt contains default template values.")
+                print("You need to edit this file with your actual Spotify API credentials.")
+                print("The program will now exit. Please edit IDs.txt and restart.")
+                print("="*60 + "\n")
+                input("Press Enter to exit...")
+                sys.exit(0)
+
 # Reads data from the IDs.txt file and parses them to be used in the API
 def connect_to_spotify():
     global API, CLIENT, PORT
@@ -620,6 +663,9 @@ def curses_main(stdscr):
 
 async def main():
     global API, CLIENT, UI
+    
+    # Check for IDs.txt at startup
+    check_ids_file()
     
     # Create a shutdown event
     shutdown_event = aio.Event()
