@@ -817,6 +817,7 @@ class SpotipyUI:
         self.running = True
         self.shutdown_flag = threading.Event()
         self.lock = threading.Lock()
+        self.resize_event = threading.Event()
         
         # Initialize curses
         curses.start_color()
@@ -848,10 +849,61 @@ class SpotipyUI:
         # Add initial log message
         self.log_window.add_log("Starting Resonite Spotipy...")
         
+        # Set up resize handler
+        self.setup_resize_handler()
+        
         # Start UI update thread
         self.update_thread = threading.Thread(target=self.update_ui_loop)
         self.update_thread.daemon = True
         self.update_thread.start()
+    
+    def setup_resize_handler(self):
+        """Set up a signal handler for terminal resize events"""
+        try:
+            import signal
+            signal.signal(signal.SIGWINCH, self.handle_resize)
+        except:
+            self.add_log("Warning: Terminal resize handling not fully supported on this platform")
+    
+    def handle_resize(self, signum, frame):
+        """Handle terminal resize event"""
+        # Set the resize event flag
+        self.resize_event.set()
+    
+    def resize_ui(self):
+        """Resize and redraw all UI components"""
+        with self.lock:
+            try:
+                # Update terminal size
+                curses.update_lines_cols()
+                
+                # Clear entire screen
+                self.stdscr.clear()
+                
+                # Recalculate component dimensions
+                self.status_bar.restart()
+                self.log_window.restart()
+                self.now_playing.restart()
+                
+                # Redraw all components
+                self.status_bar.render(None)
+                self.log_window.render(None)
+                self.now_playing.render(None)
+                
+                # Refresh the screen
+                self.stdscr.refresh()
+                
+                # Log the resize event
+                self.add_log("Terminal resized, UI adjusted")
+            except Exception as e:
+                # Try to log the error, but don't cause additional issues
+                try:
+                    self.add_log(f"Error during resize: {str(e)}")
+                except:
+                    pass
+            
+            # Clear the resize event flag
+            self.resize_event.clear()
     
     def update_ui_loop(self):
         """UI update loop running in a separate thread"""
@@ -861,6 +913,10 @@ class SpotipyUI:
         try:
             while not self.shutdown_flag.is_set():
                 try:
+                    # Check if there's a resize event
+                    if self.resize_event.is_set():
+                        self.resize_ui()
+                    
                     # Always use the animation interval for smooth animations
                     interval = animation_interval
                     
@@ -979,8 +1035,7 @@ def curses_main(stdscr):
             if key == ord('q'):  # Quit on 'q'
                 break
             elif key == ord('r'):  # Refresh on 'r'
-                stdscr.clear()
-                stdscr.refresh()
+                UI.resize_ui()  # Use same function for manual refresh
             elif key == ord('c'):  # Test cycling colors with 'c'
                 UI.test_border_colors()
             elif key == ord('1'):  # Red
@@ -1026,6 +1081,8 @@ def curses_main(stdscr):
                         UI.add_log(f"Error: {str(e)}")
                 else:
                     UI.add_log("API client not available")
+            elif key == curses.KEY_RESIZE:  # Add explicit handling for resize key
+                UI.resize_ui()
         except KeyboardInterrupt:
             break
     
